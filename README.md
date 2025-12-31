@@ -6,9 +6,9 @@ Both halves are enforced in code, not in a prompt. That's the whole idea: an age
 
 ## Status
 
-The enforcement spine is built and tested — scope, egress, evidence. The planner and the executor that sit on top of it are not written yet. I'm building it in this order on purpose, because the parts that say *no* are the parts that have to be right before anything starts acting on its own.
+The enforcement spine is built and tested — scope, egress, evidence — and on top of it, recon that maps a target into a world model. The planner and the executor are not written yet. I'm building it in this order on purpose, because the parts that say *no* are the parts that have to be right before anything starts acting on its own.
 
-26 tests, `go test ./...`.
+39 tests, `go test ./...` (race-clean).
 
 ## Why it works this way
 
@@ -75,12 +75,33 @@ Writing the test for this is how I found a bug in my own design. Two `httptest` 
 
 Refusals get audited the same as requests. The refusals are the half that shows the engagement was respected.
 
+## Recon writes a map, not a transcript
+
+Recon walks the in-scope surface and records what it finds into a world model: endpoints keyed by method + host + path, the parameter *names* each one takes, the status codes it returned, and every form with its resolved action and input fields. Two hits on `/users?id=1` and `/users?id=2` collapse into one endpoint that takes `id` — because a planner wants "there is a `/users` endpoint that takes `id`", not two rows it has to re-derive.
+
+It cannot leave scope and it is bounded. Every request goes through the egress client, and links are pre-filtered against scope before they're queued, so an out-of-scope link is dropped without a request. `MaxPages` and `MaxDepth` are hard stops — a crawler with no limit is a denial-of-service against your own target.
+
+```
+$ warrant recon examples/local.scope.json http://127.0.0.1:8099/
+ENDPOINTS
+  GET  http://127.0.0.1/            [200x1]
+  GET  http://127.0.0.1/about.html  [200x1]
+  GET  http://127.0.0.1/search  ?page,q  [404x1]
+  GET  http://127.0.0.1/users   ?id     [404x1]
+
+FORMS
+  POST http://127.0.0.1:8099/login   (password, username)
+```
+
+HTML is extracted with regexes, not a full DOM parser — a deliberate trade to stay dependency-free (standard library only). It finds hrefs, form actions and input names well enough to seed a planner, and it will miss links built by JavaScript. That limit is stated, not hidden: a recon pass is a starting map, not ground truth.
+
 ## Use
 
 ```
 warrant scope  <scope.json> <method> <url>   is this in scope, and why
 warrant fetch  <scope.json> <method> <url>   request it, checking every redirect hop
 warrant review <finding.json>                apply the evidence policy
+warrant recon  <scope.json> <seed-url>       crawl in scope, map endpoints & forms
 ```
 
 `scope` and `review` exit 3 when the answer is no, which is different from exiting 1 because something broke.
@@ -91,4 +112,4 @@ Intentionally vulnerable applications I run myself (OWASP Juice Shop, DVWA), and
 
 ## Next
 
-Recon and a world model, then the planner, then an executor limited to a fixed tool allowlist — no arbitrary shell, since an LLM proposing structured actions against a typed model is both safer and easier to replay than one proposing commands. Then the measurement that interests me most: against a target with a known bug list, what's the false-positive rate, and how much of it does the ledger catch before it reaches a report?
+Recon and the world model are done. Next is the planner that reads the map and proposes actions, then an executor limited to a fixed tool allowlist — no arbitrary shell, since an LLM proposing structured actions against a typed model is both safer and easier to replay than one proposing commands. Then the measurement that interests me most: against a target with a known bug list, what's the false-positive rate, and how much of it does the ledger catch before it reaches a report?
