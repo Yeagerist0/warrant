@@ -280,7 +280,7 @@ func isPrivateHost(host string) bool {
 // DNS name resolved to).
 func isPrivateIP(ip net.IP) bool {
 	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
-		ip.IsLinkLocalMulticast() || ip.IsUnspecified()
+		ip.IsMulticast() || ip.IsUnspecified()
 }
 
 // ResolvedIPAllowed reports whether ip is permitted to be dialed, given
