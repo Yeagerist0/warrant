@@ -96,6 +96,9 @@ func (s *Scope) validate() error {
 	if len(s.Allow) == 0 {
 		return fmt.Errorf("allow list is empty, which would authorize nothing")
 	}
+	if s.MaxRPS < 0 {
+		return fmt.Errorf("max_rps must be non-negative")
+	}
 	for i, r := range append(append([]Rule{}, s.Allow...), s.Deny...) {
 		h := strings.TrimSpace(r.Host)
 		if h == "" {
