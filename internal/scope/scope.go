@@ -13,6 +13,7 @@ package scope
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/url"
 	"os"
@@ -74,6 +75,10 @@ func Load(path string) (*Scope, error) {
 	dec.DisallowUnknownFields() // a typo'd "allowed" key must not silently mean "no rules"
 	if err := dec.Decode(&s); err != nil {
 		return nil, fmt.Errorf("scope %s: %w", path, err)
+	}
+	var extra any
+	if err := dec.Decode(&extra); err != io.EOF {
+		return nil, fmt.Errorf("scope %s: expected exactly one JSON object", path)
 	}
 	if err := s.validate(); err != nil {
 		return nil, fmt.Errorf("scope %s: %w", path, err)
