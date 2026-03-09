@@ -17,6 +17,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"path"
 	"strconv"
 	"strings"
 )
@@ -227,6 +228,16 @@ func (s *Scope) Check(method string, u *url.URL) Decision {
 	host := u.Hostname()
 	if host == "" {
 		return Decision{false, "URL has no host"}
+	}
+	// A proxy or target may collapse dot segments or repeated slashes before
+	// routing. Refuse ambiguous paths so the checked path is the served path.
+	p := u.Path
+	if p == "" {
+		p = "/"
+	}
+	clean := path.Clean(p)
+	if p != clean && p != clean+"/" {
+		return Decision{false, "URL path is not canonical"}
 	}
 	if !s.AllowPrivate && isPrivateHost(host) {
 		return Decision{false, fmt.Sprintf("%s is a private/loopback address and allow_private is off", host)}
