@@ -1,0 +1,7 @@
+{
+  "engagement": "local-vuln-demo",
+  "authority": "A deliberately vulnerable app I run on my own machine for testing warrant end to end.",
+  "allow_private": true,
+  "max_rps": 20,
+  "allow": [{ "host": "127.0.0.1", "ports": [8099], "note": "the local vulnerable app" }]
+}
