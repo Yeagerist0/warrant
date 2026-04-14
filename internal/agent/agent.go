@@ -74,10 +74,34 @@ func RunRanked(ctx context.Context, s *scope.Scope, seed string, ep execute.Poli
 	}
 	actions := plan.Plan(w)
 	if r != nil {
-		actions = r.Rank(actions)
+		// A Ranker is an ordering hint, not an authority to change the plan.
+		// Give it a copy so an in-place mutation cannot alter our fallback.
+		if ranked := r.Rank(append([]plan.Action(nil), actions...)); sameActions(actions, ranked) {
+			actions = ranked
+		}
 	}
 	results := execute.New(client, ep).Run(ctx, actions)
 
 	eps, forms, _ := w.Counts()
 	return &Outcome{Endpoints: eps, Forms: forms, Actions: actions, Results: results}, nil
+}
+
+// sameActions accepts only a permutation of the planner's exact actions.
+// IDs are unique in plan.Plan, and Action contains only comparable fields.
+func sameActions(planned, ranked []plan.Action) bool {
+	if len(planned) != len(ranked) {
+		return false
+	}
+	byID := make(map[string]plan.Action, len(planned))
+	for _, a := range planned {
+		byID[a.ID] = a
+	}
+	for _, a := range ranked {
+		original, ok := byID[a.ID]
+		if !ok || a != original {
+			return false
+		}
+		delete(byID, a.ID)
+	}
+	return len(byID) == 0
 }
