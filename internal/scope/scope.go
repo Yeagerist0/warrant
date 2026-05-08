@@ -229,6 +229,9 @@ func (s *Scope) Check(method string, u *url.URL) Decision {
 	if host == "" {
 		return Decision{false, "URL has no host"}
 	}
+	if u.User != nil {
+		return Decision{false, "URL contains userinfo; implicit Basic authentication is not allowed"}
+	}
 	// A proxy or target may collapse dot segments or repeated slashes before
 	// routing. Refuse ambiguous paths so the checked path is the served path.
 	p := u.Path
