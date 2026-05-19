@@ -1,0 +1,24 @@
+{
+  "title": "Unauthenticated write on the pairing channel",
+  "claimed": "high",
+  "claims": [
+    {
+      "id": "P1",
+      "kind": "primitive",
+      "text": "POST /api/pair/{conversationId} accepts writes with no credential",
+      "supports": "medium",
+      "status": "observed",
+      "victim_scoped": true,
+      "exhibits": [
+        { "id": "P1-a", "replays": 3, "control": "same request with a valid session cookie behaves identically, so the write is genuinely unauthenticated" }
+      ]
+    },
+    {
+      "id": "R1",
+      "kind": "reachability",
+      "text": "the conversationId is derived from a value the product displays to the user",
+      "supports": "high",
+      "status": "inferred"
+    }
+  ]
+}
