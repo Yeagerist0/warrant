@@ -24,11 +24,39 @@ import (
 	"github.com/Yeagerist0/warrant/internal/egress"
 	"github.com/Yeagerist0/warrant/internal/evidence"
 	"github.com/Yeagerist0/warrant/internal/execute"
+	"github.com/Yeagerist0/warrant/internal/llmrank"
 	"github.com/Yeagerist0/warrant/internal/model"
 	"github.com/Yeagerist0/warrant/internal/plan"
 	"github.com/Yeagerist0/warrant/internal/recon"
 	"github.com/Yeagerist0/warrant/internal/scope"
 )
+
+func envOr(k, def string) string {
+	if v := os.Getenv(k); v != "" {
+		return v
+	}
+	return def
+}
+
+// rankerFromEnv returns llmrank.Identity{} unless WARRANT_LLM_RANK=1, in which
+// case it returns an LLMRanker built from WARRANT_LLM_API_KEY and friends.
+// Ranking only ever reorders plan.Plan's fixed catalog -- see internal/llmrank.
+func rankerFromEnv() (llmrank.Ranker, string, error) {
+	if os.Getenv("WARRANT_LLM_RANK") != "1" {
+		return llmrank.Identity{}, "hand-written priority (no --rank)", nil
+	}
+	key := os.Getenv("WARRANT_LLM_API_KEY")
+	if key == "" {
+		return nil, "", fmt.Errorf("WARRANT_LLM_RANK=1 needs WARRANT_LLM_API_KEY")
+	}
+	m := &llmrank.LLMRanker{
+		BaseURL:         envOr("WARRANT_LLM_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai"),
+		APIKey:          key,
+		ModelName:       envOr("WARRANT_LLM_MODEL", "gemini-3.1-flash-lite"),
+		ReasoningEffort: envOr("WARRANT_LLM_REASONING_EFFORT", "none"),
+	}
+	return m, "LLM-ranked (" + m.ModelName + ")", nil
+}
 
 const usage = `warrant -- authorized web testing agent
 
@@ -40,6 +68,11 @@ const usage = `warrant -- authorized web testing agent
   warrant run    <scope.json> <seed-url>       recon, plan, run SAFE probes, judge findings
 
 Every scope file must name an engagement and the authority it was tested under.
+
+plan and run always rank by the hand-written priority in internal/plan. Set
+WARRANT_LLM_RANK=1 (and WARRANT_LLM_API_KEY) to have a model re-order the same
+fixed action list instead -- it can only reorder, never add an action; see
+internal/llmrank.
 `
 
 func main() {
@@ -61,6 +94,8 @@ func main() {
 		err = cmdPlan(os.Args[2:])
 	case "run":
 		err = cmdRun(os.Args[2:])
+	case "rankeval":
+		err = cmdRankEval(os.Args[2:])
 	case "-h", "--help", "help":
 		fmt.Print(usage)
 		return
@@ -212,9 +247,14 @@ func cmdPlan(args []string) error {
 		return err
 	}
 	actions := plan.Plan(w)
+	r, rankDesc, err := rankerFromEnv()
+	if err != nil {
+		return err
+	}
+	actions = r.Rank(actions)
 	eps, forms, visited := w.Counts()
-	fmt.Printf("engagement: %s\n%d pages, %d endpoints, %d forms -> %d proposed actions\n\n",
-		s.Engagement, visited, eps, forms, len(actions))
+	fmt.Printf("engagement: %s\n%d pages, %d endpoints, %d forms -> %d proposed actions\nranking: %s\n\n",
+		s.Engagement, visited, eps, forms, len(actions), rankDesc)
 
 	fmt.Println("PLAN (highest priority first; nothing has been executed)")
 	for _, a := range actions {
@@ -247,13 +287,17 @@ func cmdRun(args []string) error {
 		return fmt.Errorf("seed is out of scope: %s", d.Reason)
 	}
 
-	out, err := agent.Run(context.Background(), s, args[1], execute.DefaultPolicy(), stderrAuditor{})
+	r, rankDesc, err := rankerFromEnv()
+	if err != nil {
+		return err
+	}
+	out, err := agent.RunRanked(context.Background(), s, args[1], execute.DefaultPolicy(), stderrAuditor{}, r)
 	if err != nil {
 		return err
 	}
 
-	fmt.Printf("engagement: %s\n%d endpoints, %d forms -> %d actions; running SAFE probes only\n\n",
-		s.Engagement, out.Endpoints, out.Forms, len(out.Actions))
+	fmt.Printf("engagement: %s\n%d endpoints, %d forms -> %d actions; running SAFE probes only\nranking: %s\n\n",
+		s.Engagement, out.Endpoints, out.Forms, len(out.Actions), rankDesc)
 	for _, r := range out.Results {
 		a := r.Action
 		switch {
