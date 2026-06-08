@@ -1,0 +1,7 @@
+{
+  "engagement": "local-recon-demo",
+  "authority": "Local static site I am running on my own machine for a recon demo.",
+  "allow_private": true,
+  "max_rps": 20,
+  "allow": [{ "host": "127.0.0.1", "ports": [8099], "note": "the demo site" }]
+}
