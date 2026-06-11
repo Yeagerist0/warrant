@@ -221,10 +221,14 @@ func (c *Client) Do(ctx context.Context, method string, raw string, body io.Read
 		loc := resp.Header.Get("Location")
 		isRedirect := resp.StatusCode >= 300 && resp.StatusCode < 400 && loc != ""
 		if !isRedirect {
-			b, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+			const maxResponseBytes = 8 << 20
+			b, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
 			resp.Body.Close()
 			if err != nil {
 				return nil, err
+			}
+			if len(b) > maxResponseBytes {
+				return nil, fmt.Errorf("response from %s exceeds %d-byte limit", u, maxResponseBytes)
 			}
 			return &Response{Status: resp.StatusCode, Header: resp.Header, Body: b, Hops: hops}, nil
 		}
