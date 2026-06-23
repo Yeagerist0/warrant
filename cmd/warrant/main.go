@@ -23,6 +23,7 @@ import (
 	"github.com/Yeagerist0/warrant/internal/egress"
 	"github.com/Yeagerist0/warrant/internal/evidence"
 	"github.com/Yeagerist0/warrant/internal/model"
+	"github.com/Yeagerist0/warrant/internal/plan"
 	"github.com/Yeagerist0/warrant/internal/recon"
 	"github.com/Yeagerist0/warrant/internal/scope"
 )
@@ -33,6 +34,7 @@ const usage = `warrant -- authorized web testing agent
   warrant fetch  <scope.json> <method> <url>   request it, checking every redirect hop
   warrant review <finding.json>                apply the evidence policy
   warrant recon  <scope.json> <seed-url>       crawl in scope, map endpoints & forms
+  warrant plan   <scope.json> <seed-url>       recon, then propose ranked probe actions
 
 Every scope file must name an engagement and the authority it was tested under.
 `
@@ -52,6 +54,8 @@ func main() {
 		err = cmdReview(os.Args[2:])
 	case "recon":
 		err = cmdRecon(os.Args[2:])
+	case "plan":
+		err = cmdPlan(os.Args[2:])
 	case "-h", "--help", "help":
 		fmt.Print(usage)
 		return
@@ -167,6 +171,57 @@ func cmdRecon(args []string) error {
 		for _, f := range w.Forms() {
 			fmt.Printf("  %-4s %s  (%s)\n", f.Method, f.Action, strings.Join(f.Inputs, ", "))
 		}
+	}
+	return nil
+}
+
+func crawlInto(s *scope.Scope, seed string, quiet bool) (*model.World, error) {
+	u, err := url.Parse(seed)
+	if err != nil {
+		return nil, fmt.Errorf("bad seed URL %q: %w", seed, err)
+	}
+	if d := s.Check("GET", u); !d.Allowed {
+		return nil, fmt.Errorf("seed is out of scope: %s", d.Reason)
+	}
+	w := model.New()
+	c := recon.New(s, egress.New(s, stderrAuditor{}), w)
+	if !quiet {
+		c.OnEvent = func(msg string) { fmt.Fprintln(os.Stderr, "[recon]", msg) }
+	}
+	if err := c.Crawl(context.Background(), []string{seed}); err != nil {
+		return nil, err
+	}
+	return w, nil
+}
+
+func cmdPlan(args []string) error {
+	if len(args) != 2 {
+		return fmt.Errorf("usage: warrant plan <scope.json> <seed-url>")
+	}
+	s, err := scope.Load(args[0])
+	if err != nil {
+		return err
+	}
+	w, err := crawlInto(s, args[1], false)
+	if err != nil {
+		return err
+	}
+	actions := plan.Plan(w)
+	eps, forms, visited := w.Counts()
+	fmt.Printf("engagement: %s\n%d pages, %d endpoints, %d forms -> %d proposed actions\n\n",
+		s.Engagement, visited, eps, forms, len(actions))
+
+	fmt.Println("PLAN (highest priority first; nothing has been executed)")
+	for _, a := range actions {
+		flag := "safe"
+		if !a.Safe {
+			flag = "NEEDS-CONFIRM"
+		}
+		fmt.Printf("  [%3d] %-16s %-6s %s\n", a.Priority, a.Kind, a.Method, a.URL)
+		if a.Mutation != "" {
+			fmt.Printf("        mutate %s: %s\n", a.Param, a.Mutation)
+		}
+		fmt.Printf("        %s  (%s)\n", a.Rationale, flag)
 	}
 	return nil
 }
