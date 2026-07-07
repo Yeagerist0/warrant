@@ -6,9 +6,9 @@ Both halves are enforced in code, not in a prompt. That's the whole idea: an age
 
 ## Status
 
-The enforcement spine is built and tested — scope, egress, evidence — and on top of it, recon that maps a target into a world model, and a planner that turns that map into ranked probes. The executor is not written yet. I'm building it in this order on purpose, because the parts that say *no* are the parts that have to be right before anything starts acting on its own.
+The enforcement spine is built and tested — scope, egress, evidence — and on top of it, recon that maps a target into a world model, a planner that ranks probes, and an executor that runs the safe ones and hands each result to the evidence ledger. The loop is closed. I'm building it in this order on purpose, because the parts that say *no* are the parts that have to be right before anything starts acting on its own.
 
-48 tests, `go test ./...` (race-clean).
+59 tests, `go test ./...` (race-clean).
 
 ## Why it works this way
 
@@ -117,6 +117,31 @@ PLAN (highest priority first; nothing has been executed)
 
 Each action is marked `safe` or `NEEDS-CONFIRM`: a read-only GET probe is safe, submitting a form or a state-changing verb is not, and the executor will have to require confirmation for the latter. A probe is only proposed against an endpoint that actually answered — tampering an id on something that only ever 404'd proves nothing.
 
+## The executor runs the plan; the ledger refuses to overclaim
+
+`warrant run` closes the loop: recon builds the map, the planner ranks the probes, and the executor runs the safe ones through the scope-gated client and turns each response into typed claims that the evidence ledger judges. Its job is not to decide what is a finding — it gathers what it honestly observed, with a control and repeated reproductions, and hands a Finding to the ledger.
+
+Point it at an app riddled with textbook IDOR and it engages every one of them — and files none of them:
+
+```
+$ warrant run examples/vuln.scope.json http://127.0.0.1:8099/
+  probe param-tamper  .../admin/users?id=41   -> not reportable
+        blocked: primitive operates on a victim-scoped identifier, but no observed
+                 claim shows where an attacker obtains that identifier from an
+                 internet position; find the disclosure and make that the finding
+  probe missing-auth  .../account?account_id=1001 -> not reportable
+        blocked: claim P1 has no negative control, so 'the target does this for
+                 everyone' is not ruled out
+  probe method-probe  .../search?q=x
+        allowed methods: GET, OPTIONS
+
+summary: 9 executed, 0 skipped | findings: 0 reportable, 4 refused by the ledger
+```
+
+The executor found real distinct objects behind those ids — it isn't missing the bug. It refuses to *file* the bug because it never proved the object belongs to someone else. That is the entire project in one line of output: an agent that probes real vulnerabilities and still writes zero reports it can't stand behind. A NEEDS-CONFIRM action (a form submission, a state-changing verb) is skipped under the default policy, not run.
+
+The measurement is baked in as a test (`internal/agent`): the pipeline runs against an app with a known bug list, and asserts it engages the IDOR/unauth surface while the ledger clears **zero** unprovable findings — precision 1.0, no false-positive reports — and never leaves scope.
+
 ## Use
 
 ```
@@ -125,6 +150,7 @@ warrant fetch  <scope.json> <method> <url>   request it, checking every redirect
 warrant review <finding.json>                apply the evidence policy
 warrant recon  <scope.json> <seed-url>       crawl in scope, map endpoints & forms
 warrant plan   <scope.json> <seed-url>       recon, then propose ranked probe actions
+warrant run    <scope.json> <seed-url>       recon, plan, run SAFE probes, judge findings
 ```
 
 `scope` and `review` exit 3 when the answer is no, which is different from exiting 1 because something broke.
@@ -133,6 +159,15 @@ warrant plan   <scope.json> <seed-url>       recon, then propose ranked probe ac
 
 Intentionally vulnerable applications I run myself (OWASP Juice Shop, DVWA), and programs that have authorized testing in writing. The scope file is the mechanism for the second case and the `authority` field is not decorative.
 
-## Next
+## Where it stands, and what's honest about it
 
-Recon, the world model and the planner are done. Next is an executor limited to a fixed tool allowlist — no arbitrary shell, since an LLM proposing structured actions against a typed model is both safer and easier to replay than one proposing commands. Then the measurement that interests me most: against a target with a known bug list, what's the false-positive rate, and how much of it does the ledger catch before it reaches a report?
+The loop is closed and tested end to end: scope → egress → recon → world model → planner → executor → evidence, with the whole thing runnable as `warrant run` and measured by an integration test.
+
+What it is: a scope-safe agent that maps a target, decides what to try, runs the read-only probes, and only files what it can prove. What it is not, yet, and I'd rather say so than imply otherwise:
+
+- The probe catalog is small — IDOR, missing-auth, method and header checks. It's the shape that has paid, not the whole surface.
+- The planner's rules are hand-written. The typed catalog is exactly what would let an LLM rank and propose here later without being able to invent an action the executor doesn't understand — but that swap isn't done.
+- Reachability is the thing the executor can't establish alone (a second account, an id-disclosure), which is why honest IDOR findings come back refused. Closing that gap — chaining a disclosure into a reachability claim — is the natural next capability.
+- HTML recon is regex-based and misses JS-built links.
+
+Every one of those is a stated limit, not a hidden one, which is the same standard the ledger holds a finding to.
