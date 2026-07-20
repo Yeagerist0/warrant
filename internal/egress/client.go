@@ -116,13 +116,25 @@ func safeDialContext(s *scope.Scope, a Auditor, resolver ipResolver) func(ctx co
 				candidates = append(candidates, a.IP)
 			}
 		}
+		if len(candidates) == 0 {
+			return nil, fmt.Errorf("%s resolved to no addresses", host)
+		}
 
+		var lastDialErr error
 		for _, ip := range candidates {
-			if s.ResolvedIPAllowed(ip) {
-				record(a, host, ip, true)
-				return dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
+			if !s.ResolvedIPAllowed(ip) {
+				record(a, host, ip, false)
+				continue
 			}
-			record(a, host, ip, false)
+			record(a, host, ip, true)
+			conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
+			if err == nil {
+				return conn, nil
+			}
+			lastDialErr = err
+		}
+		if lastDialErr != nil {
+			return nil, fmt.Errorf("dialing allowed addresses for %s: %w", host, lastDialErr)
 		}
 		return nil, fmt.Errorf("%s resolved only to private/loopback addresses and allow_private is off", host)
 	}
