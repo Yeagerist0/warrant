@@ -14,6 +14,7 @@ import (
 
 	"github.com/Yeagerist0/warrant/internal/egress"
 	"github.com/Yeagerist0/warrant/internal/execute"
+	"github.com/Yeagerist0/warrant/internal/llmrank"
 	"github.com/Yeagerist0/warrant/internal/model"
 	"github.com/Yeagerist0/warrant/internal/plan"
 	"github.com/Yeagerist0/warrant/internal/recon"
@@ -55,7 +56,16 @@ func (o *Outcome) Summary() (executed, skipped, reportable, refused int) {
 
 // Run performs recon from the seed, plans, and executes the safe probes.
 // auditor may be nil. The seed is scope-checked before anything is fetched.
+// Ranking is the hand-written priority order (plan.Plan's own Priority field):
+// equivalent to RunRanked with llmrank.Identity{}.
 func Run(ctx context.Context, s *scope.Scope, seed string, ep execute.Policy, auditor egress.Auditor) (*Outcome, error) {
+	return RunRanked(ctx, s, seed, ep, auditor, llmrank.Identity{})
+}
+
+// RunRanked is Run with the order of the planned actions handed to r before
+// execution. r can only reorder what plan.Plan already produced -- see the
+// llmrank package doc for why that is the whole point of the interface.
+func RunRanked(ctx context.Context, s *scope.Scope, seed string, ep execute.Policy, auditor egress.Auditor, r llmrank.Ranker) (*Outcome, error) {
 	client := egress.New(s, auditor)
 	w := model.New()
 	c := recon.New(s, client, w)
@@ -63,6 +73,9 @@ func Run(ctx context.Context, s *scope.Scope, seed string, ep execute.Policy, au
 		return nil, err
 	}
 	actions := plan.Plan(w)
+	if r != nil {
+		actions = r.Rank(actions)
+	}
 	results := execute.New(client, ep).Run(ctx, actions)
 
 	eps, forms, _ := w.Counts()
