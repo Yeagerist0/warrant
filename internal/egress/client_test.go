@@ -2,6 +2,7 @@ package egress
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -67,7 +68,11 @@ func TestInScopeRequestSucceeds(t *testing.T) {
 	if resp.Status != 200 || string(resp.Body) != "hello" {
 		t.Errorf("resp = %d %q", resp.Status, resp.Body)
 	}
-	if len(rec.got) != 1 || !strings.HasPrefix(rec.got[0], "ALLOW") {
+	// Two records for one request: Check's own ALLOW GET, and the dial-time
+	// ALLOW DNS for the address it actually connected to -- safeDialContext's
+	// half of the scope gate, which Check alone can't provide for a DNS name
+	// (see internal/scope.ResolvedIPAllowed).
+	if len(rec.got) != 2 || !strings.HasPrefix(rec.got[0], "ALLOW GET") || !strings.HasPrefix(rec.got[1], "ALLOW DNS") {
 		t.Errorf("audit trail = %v", rec.got)
 	}
 }
@@ -126,7 +131,10 @@ func TestRedirectOutOfScopeIsRefused(t *testing.T) {
 	if !oos.ViaRedirect {
 		t.Error("refusal should be flagged as happening mid-chain")
 	}
-	if len(rec.got) != 2 || !strings.HasPrefix(rec.got[1], "DENY") {
+	// Three records: hop one's ALLOW GET, its dial-time ALLOW DNS (it was in
+	// scope, so the dialer ran), then hop two's DENY GET -- refused by Check
+	// before any dial was attempted, so no DNS record follows it.
+	if len(rec.got) != 3 || !strings.HasPrefix(rec.got[1], "ALLOW DNS") || !strings.HasPrefix(rec.got[2], "DENY GET") {
 		t.Errorf("both hops should be audited, got %v", rec.got)
 	}
 }
@@ -165,6 +173,73 @@ func TestRedirectLoopIsBounded(t *testing.T) {
 	c.MaxRedirects = 3
 	if _, err := c.Do(context.Background(), "GET", srv.URL+"/loop", nil); err == nil {
 		t.Fatal("expected the redirect limit to stop an in-scope loop")
+	}
+}
+
+// fakeResolver stands in for real DNS so a test can make a hostname resolve
+// to whatever address the rebinding scenario needs, deterministically.
+type fakeResolver struct {
+	ips []net.IP
+}
+
+func (f fakeResolver) LookupIPAddr(context.Context, string) ([]net.IPAddr, error) {
+	addrs := make([]net.IPAddr, len(f.ips))
+	for i, ip := range f.ips {
+		addrs[i] = net.IPAddr{IP: ip}
+	}
+	return addrs, nil
+}
+
+// This is the attack safeDialContext exists for: scope.Check only ever sees
+// the hostname string in the URL, so an allow-listed DNS name that resolves
+// to a private address -- the rebinding case, where the answer at connect
+// time differs from whatever it was (or would have been) when scope was
+// decided -- must still be refused, even though nothing about the URL itself
+// looks private. Here "attacker.example.com" would pass Check fine; the
+// resolver is rigged to answer with a loopback address, which is the part a
+// real rebinding attacker controls.
+func TestSafeDialContext_HostnameResolvingToPrivateIPIsRefused(t *testing.T) {
+	s := &scope.Scope{Engagement: "test", Authority: "local lab"} // AllowPrivate defaults false
+	rec := &recorder{}
+	dial := safeDialContext(s, rec, fakeResolver{ips: []net.IP{net.ParseIP("127.0.0.1")}})
+
+	_, err := dial(context.Background(), "tcp", "attacker.example.com:80")
+	if err == nil {
+		t.Fatal("expected the dial to be refused")
+	}
+	if !strings.Contains(err.Error(), "private/loopback") {
+		t.Errorf("error = %v, want it to name the private/loopback reason", err)
+	}
+	if len(rec.got) != 1 || !strings.HasPrefix(rec.got[0], "DENY DNS") {
+		t.Errorf("audit trail = %v, want exactly one DENY DNS record", rec.got)
+	}
+}
+
+// The counterpart: when the scope explicitly opts into private targets (a
+// local lab, a deliberately internal engagement), the same resolved private
+// address must be dialed, not refused -- proving the check is a real policy
+// gate and not a hardcoded ban on RFC1918/loopback addresses.
+func TestSafeDialContext_HostnameResolvingToPrivateIPIsAllowedWhenAllowPrivate(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("reached"))
+	}))
+	defer srv.Close()
+	host, port, err := net.SplitHostPort(strings.TrimPrefix(srv.URL, "http://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s := &scope.Scope{Engagement: "test", Authority: "local lab", AllowPrivate: true}
+	rec := &recorder{}
+	dial := safeDialContext(s, rec, fakeResolver{ips: []net.IP{net.ParseIP(host)}})
+
+	conn, err := dial(context.Background(), "tcp", "internal.lab.invalid:"+port)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	conn.Close()
+	if len(rec.got) != 1 || !strings.HasPrefix(rec.got[0], "ALLOW DNS") {
+		t.Errorf("audit trail = %v, want exactly one ALLOW DNS record", rec.got)
 	}
 }
 

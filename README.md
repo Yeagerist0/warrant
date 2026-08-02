@@ -8,7 +8,7 @@ Both halves are enforced in code, not in a prompt. That's the whole idea: an age
 
 The enforcement spine is built and tested — scope, egress, evidence — and on top of it, recon that maps a target into a world model, a planner that ranks probes, and an executor that runs the safe ones and hands each result to the evidence ledger. The loop is closed. I'm building it in this order on purpose, because the parts that say *no* are the parts that have to be right before anything starts acting on its own.
 
-59 tests, `go test ./...` (race-clean).
+69 tests, `go test ./...` (race-clean).
 
 ## Why it works this way
 
@@ -58,6 +58,10 @@ Every scope file has to name the authority it was tested under, or it won't load
 ```
 
 Private and loopback addresses are blocked unless you opt in, so a scope written for a public target can't be turned inward by a redirect or a hostname that resolves to 127.0.0.1.
+
+That sentence was aspirational until recently. `Check` decides from the hostname string in the URL — for a DNS name, not the address it resolves to, because that address isn't known yet. The actual connection goes through Go's default dialer, which does its own lookup afterward, unexamined. So an allow-listed name that resolves to `127.0.0.1` — through misconfiguration, or a DNS-rebinding attack timed to answer one way when scope checks and a different way when the connection is actually made — went out unchecked. `grep -rn "DialContext\|net.Dialer" internal/` found nothing, which is how I noticed: the egress client was a plain `http.Client` with no custom transport at all.
+
+The fix is a second check at dial time (`internal/egress/client.go`'s `safeDialContext`): it resolves the host itself, tests every candidate address against the same private/loopback rule `Check` uses, and dials only one that passes — never handing the hostname to the default dialer, so there's no second, un-inspectable lookup for a rebinding attacker to answer differently. Every resolution is audited (`ALLOW DNS` / `DENY DNS`), same as a request. Tested with a fake resolver standing in for DNS (`TestSafeDialContext_HostnameResolvingToPrivateIPIsRefused` and its `AllowPrivate` counterpart), since real DNS can't be made to answer a chosen address on demand in a test.
 
 ## Redirects are where scope actually leaks
 
