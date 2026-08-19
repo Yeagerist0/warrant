@@ -174,16 +174,26 @@ type Response struct {
 	Hops   []string
 }
 
-func (c *Client) throttle() {
+func (c *Client) throttle(ctx context.Context) error {
 	if c.gap == 0 {
-		return
+		return ctx.Err()
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if wait := c.gap - time.Since(c.last); wait > 0 {
-		time.Sleep(wait)
+		timer := time.NewTimer(wait)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	c.last = time.Now()
+	return nil
 }
 
 // Do issues a request, following redirects only while every hop stays in scope.
@@ -206,7 +216,9 @@ func (c *Client) Do(ctx context.Context, method string, raw string, body io.Read
 			}
 		}
 
-		c.throttle()
+		if err := c.throttle(ctx); err != nil {
+			return nil, err
+		}
 		req, err := http.NewRequestWithContext(ctx, method, u.String(), body)
 		if err != nil {
 			return nil, err
