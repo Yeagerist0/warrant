@@ -107,7 +107,7 @@ func (s *Scope) validate() error {
 		if h == "*" {
 			return fmt.Errorf(`rule %d uses host "*", which is never a real engagement scope`, i)
 		}
-		if strings.Contains(h, "*") && !strings.HasPrefix(h, "*.") {
+		if strings.Contains(h, "*") && (!strings.HasPrefix(h, "*.") || len(h) <= 2 || strings.Contains(h[2:], "*") || strings.HasPrefix(h[2:], ".")) {
 			return fmt.Errorf("rule %d: wildcard must be a leading label, e.g. *.example.com, got %q", i, h)
 		}
 		for _, path := range r.Paths {
