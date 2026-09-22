@@ -1,0 +1,12 @@
+{
+  "engagement": "juice-shop-local",
+  "authority": "Locally hosted OWASP Juice Shop, an intentionally vulnerable application run by me on my own machine for training. No third-party system is in scope.",
+  "allow_private": true,
+  "max_rps": 8,
+  "allow": [
+    { "host": "127.0.0.1", "ports": [3000], "note": "the Juice Shop container" }
+  ],
+  "deny": [
+    { "host": "127.0.0.1", "paths": ["/ftp/"], "note": "file-serving path, out of scope for this exercise" }
+  ]
+}
