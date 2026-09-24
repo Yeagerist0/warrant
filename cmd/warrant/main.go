@@ -20,8 +20,10 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/Yeagerist0/warrant/internal/agent"
 	"github.com/Yeagerist0/warrant/internal/egress"
 	"github.com/Yeagerist0/warrant/internal/evidence"
+	"github.com/Yeagerist0/warrant/internal/execute"
 	"github.com/Yeagerist0/warrant/internal/model"
 	"github.com/Yeagerist0/warrant/internal/plan"
 	"github.com/Yeagerist0/warrant/internal/recon"
@@ -35,6 +37,7 @@ const usage = `warrant -- authorized web testing agent
   warrant review <finding.json>                apply the evidence policy
   warrant recon  <scope.json> <seed-url>       crawl in scope, map endpoints & forms
   warrant plan   <scope.json> <seed-url>       recon, then propose ranked probe actions
+  warrant run    <scope.json> <seed-url>       recon, plan, run SAFE probes, judge findings
 
 Every scope file must name an engagement and the authority it was tested under.
 `
@@ -56,6 +59,8 @@ func main() {
 		err = cmdRecon(os.Args[2:])
 	case "plan":
 		err = cmdPlan(os.Args[2:])
+	case "run":
+		err = cmdRun(os.Args[2:])
 	case "-h", "--help", "help":
 		fmt.Print(usage)
 		return
@@ -226,6 +231,56 @@ func cmdPlan(args []string) error {
 	return nil
 }
 
+func cmdRun(args []string) error {
+	if len(args) != 2 {
+		return fmt.Errorf("usage: warrant run <scope.json> <seed-url>")
+	}
+	s, err := scope.Load(args[0])
+	if err != nil {
+		return err
+	}
+	u, err := url.Parse(args[1])
+	if err != nil {
+		return fmt.Errorf("bad seed URL %q: %w", args[1], err)
+	}
+	if d := s.Check("GET", u); !d.Allowed {
+		return fmt.Errorf("seed is out of scope: %s", d.Reason)
+	}
+
+	out, err := agent.Run(context.Background(), s, args[1], execute.DefaultPolicy(), stderrAuditor{})
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("engagement: %s\n%d endpoints, %d forms -> %d actions; running SAFE probes only\n\n",
+		s.Engagement, out.Endpoints, out.Forms, len(out.Actions))
+	for _, r := range out.Results {
+		a := r.Action
+		switch {
+		case r.Skipped:
+			fmt.Printf("  SKIP  %-16s %s\n        %s\n", a.Kind, a.URL, r.SkipReason)
+		case r.Err != nil:
+			fmt.Printf("  ERR   %-16s %s\n        %v\n", a.Kind, a.URL, r.Err)
+		case r.Finding != nil:
+			if r.Verdict.Reportable {
+				fmt.Printf("  FIND  %-16s %s -> REPORTABLE at %s\n", a.Kind, a.URL, r.Verdict.Severity)
+			} else {
+				fmt.Printf("  probe %-16s %s -> not reportable\n", a.Kind, a.URL)
+				for _, b := range r.Verdict.Blocking {
+					fmt.Printf("        blocked: %s\n", b)
+				}
+			}
+		default:
+			if r.Note != "" {
+				fmt.Printf("  probe %-16s %s\n        %s\n", a.Kind, a.URL, r.Note)
+			}
+		}
+	}
+	executed, skipped, reportable, refused := out.Summary()
+	fmt.Printf("\nsummary: %d executed, %d skipped (need confirm) | findings: %d reportable, %d refused by the ledger\n",
+		executed, skipped, reportable, refused)
+	return nil
+}
 func cmdReview(args []string) error {
 	if len(args) != 1 {
 		return fmt.Errorf("usage: warrant review <finding.json>")
