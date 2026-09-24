@@ -6,9 +6,9 @@ Both halves are enforced in code, not in a prompt. That's the whole idea: an age
 
 ## Status
 
-The enforcement spine is built and tested — scope, egress, evidence — and on top of it, recon that maps a target into a world model. The planner and the executor are not written yet. I'm building it in this order on purpose, because the parts that say *no* are the parts that have to be right before anything starts acting on its own.
+The enforcement spine is built and tested — scope, egress, evidence — and on top of it, recon that maps a target into a world model, and a planner that turns that map into ranked probes. The executor is not written yet. I'm building it in this order on purpose, because the parts that say *no* are the parts that have to be right before anything starts acting on its own.
 
-39 tests, `go test ./...` (race-clean).
+48 tests, `go test ./...` (race-clean).
 
 ## Why it works this way
 
@@ -95,6 +95,28 @@ FORMS
 
 HTML is extracted with regexes, not a full DOM parser — a deliberate trade to stay dependency-free (standard library only). It finds hrefs, form actions and input names well enough to seed a planner, and it will miss links built by JavaScript. That limit is stated, not hidden: a recon pass is a starting map, not ground truth.
 
+## The planner proposes; it does not act
+
+`warrant plan` runs recon and then reads the world model into a ranked list of probes. It only proposes — nothing is sent — so the plan is something you read top to bottom and approve before an executor (next) runs it one action at a time under the scope gate.
+
+The catalog is fixed and typed. Actions come from a known set of check kinds, not free text, so whatever proposes them — these rules today, an LLM later — the executor still only ever runs a probe it understands. That is what would make an LLM safe to add here: it could rank and suggest, but not invent an action outside the catalog.
+
+The rules lean on what has actually paid — unauthenticated reach into sensitive functions, and identifier tampering — and rank those first:
+
+```
+$ warrant plan examples/local.scope.json http://127.0.0.1:8099/
+PLAN (highest priority first; nothing has been executed)
+  [ 90] missing-auth   GET  .../admin/users?id=42
+        path "/admin/users" looks sensitive; re-request with no credentials and compare  (safe)
+  [ 80] param-tamper   GET  .../account/?account_id=1000
+        mutate account_id: 1001 -> 1000 (adjacent object)  (safe)
+  [ 30] method-probe   OPTIONS .../search?q=test   (safe)
+  [ 50] method-probe   POST .../login
+        authentication form; handle credentials via the operator, never auto-fill  (NEEDS-CONFIRM)
+```
+
+Each action is marked `safe` or `NEEDS-CONFIRM`: a read-only GET probe is safe, submitting a form or a state-changing verb is not, and the executor will have to require confirmation for the latter. A probe is only proposed against an endpoint that actually answered — tampering an id on something that only ever 404'd proves nothing.
+
 ## Use
 
 ```
@@ -102,6 +124,7 @@ warrant scope  <scope.json> <method> <url>   is this in scope, and why
 warrant fetch  <scope.json> <method> <url>   request it, checking every redirect hop
 warrant review <finding.json>                apply the evidence policy
 warrant recon  <scope.json> <seed-url>       crawl in scope, map endpoints & forms
+warrant plan   <scope.json> <seed-url>       recon, then propose ranked probe actions
 ```
 
 `scope` and `review` exit 3 when the answer is no, which is different from exiting 1 because something broke.
@@ -112,4 +135,4 @@ Intentionally vulnerable applications I run myself (OWASP Juice Shop, DVWA), and
 
 ## Next
 
-Recon and the world model are done. Next is the planner that reads the map and proposes actions, then an executor limited to a fixed tool allowlist — no arbitrary shell, since an LLM proposing structured actions against a typed model is both safer and easier to replay than one proposing commands. Then the measurement that interests me most: against a target with a known bug list, what's the false-positive rate, and how much of it does the ledger catch before it reaches a report?
+Recon, the world model and the planner are done. Next is an executor limited to a fixed tool allowlist — no arbitrary shell, since an LLM proposing structured actions against a typed model is both safer and easier to replay than one proposing commands. Then the measurement that interests me most: against a target with a known bug list, what's the false-positive rate, and how much of it does the ledger catch before it reaches a report?
