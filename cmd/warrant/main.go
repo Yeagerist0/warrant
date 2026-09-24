@@ -17,10 +17,13 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/Yeagerist0/warrant/internal/egress"
 	"github.com/Yeagerist0/warrant/internal/evidence"
+	"github.com/Yeagerist0/warrant/internal/model"
+	"github.com/Yeagerist0/warrant/internal/recon"
 	"github.com/Yeagerist0/warrant/internal/scope"
 )
 
@@ -29,6 +32,7 @@ const usage = `warrant -- authorized web testing agent
   warrant scope  <scope.json> <method> <url>   is this in scope, and why
   warrant fetch  <scope.json> <method> <url>   request it, checking every redirect hop
   warrant review <finding.json>                apply the evidence policy
+  warrant recon  <scope.json> <seed-url>       crawl in scope, map endpoints & forms
 
 Every scope file must name an engagement and the authority it was tested under.
 `
@@ -46,6 +50,8 @@ func main() {
 		err = cmdFetch(os.Args[2:])
 	case "review":
 		err = cmdReview(os.Args[2:])
+	case "recon":
+		err = cmdRecon(os.Args[2:])
 	case "-h", "--help", "help":
 		fmt.Print(usage)
 		return
@@ -104,6 +110,62 @@ func cmdFetch(args []string) error {
 		fmt.Println("chain:")
 		for _, h := range resp.Hops {
 			fmt.Println("  ->", h)
+		}
+	}
+	return nil
+}
+
+func cmdRecon(args []string) error {
+	if len(args) != 2 {
+		return fmt.Errorf("usage: warrant recon <scope.json> <seed-url>")
+	}
+	s, err := scope.Load(args[0])
+	if err != nil {
+		return err
+	}
+	seed := args[1]
+	u, err := url.Parse(seed)
+	if err != nil {
+		return fmt.Errorf("bad seed URL %q: %w", seed, err)
+	}
+	if d := s.Check("GET", u); !d.Allowed {
+		return fmt.Errorf("seed is out of scope: %s", d.Reason)
+	}
+
+	w := model.New()
+	c := recon.New(s, egress.New(s, stderrAuditor{}), w)
+	c.OnEvent = func(msg string) { fmt.Fprintln(os.Stderr, "[recon]", msg) }
+	if err := c.Crawl(context.Background(), []string{seed}); err != nil {
+		return err
+	}
+
+	eps, forms, visited := w.Counts()
+	fmt.Printf("engagement: %s\n%d pages crawled, %d endpoints, %d forms\n\n",
+		s.Engagement, visited, eps, forms)
+
+	fmt.Println("ENDPOINTS")
+	for _, e := range w.Endpoints() {
+		params := make([]string, 0, len(e.Params))
+		for name := range e.Params {
+			params = append(params, name)
+		}
+		sort.Strings(params)
+		status := make([]string, 0, len(e.Statuses))
+		for code, n := range e.Statuses {
+			status = append(status, fmt.Sprintf("%dx%d", code, n))
+		}
+		sort.Strings(status)
+		line := fmt.Sprintf("  %-4s %s://%s%s", e.Method, e.Scheme, e.Host, e.Path)
+		if len(params) > 0 {
+			line += "  ?" + strings.Join(params, ",")
+		}
+		line += "  [" + strings.Join(status, " ") + "]"
+		fmt.Println(line)
+	}
+	if len(w.Forms()) > 0 {
+		fmt.Println("\nFORMS")
+		for _, f := range w.Forms() {
+			fmt.Printf("  %-4s %s  (%s)\n", f.Method, f.Action, strings.Join(f.Inputs, ", "))
 		}
 	}
 	return nil
