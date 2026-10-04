@@ -99,7 +99,7 @@ HTML is extracted with regexes, not a full DOM parser — a deliberate trade to 
 
 `warrant plan` runs recon and then reads the world model into a ranked list of probes. It only proposes — nothing is sent — so the plan is something you read top to bottom and approve before an executor (next) runs it one action at a time under the scope gate.
 
-The catalog is fixed and typed. Actions come from a known set of check kinds, not free text, so whatever proposes them — these rules today, an LLM later — the executor still only ever runs a probe it understands. That is what would make an LLM safe to add here: it could rank and suggest, but not invent an action outside the catalog.
+The catalog is fixed and typed. Actions come from a known set of check kinds, not free text, so whatever proposes them — these rules today, an LLM later — the executor still only ever runs a probe it understands. That is what makes an LLM safe to add here: `internal/llmrank` lets a model re-order the same actions the rules already proposed; it is given each action's id, kind, priority and rationale and returns `{id, priority}` pairs, and anything it returns that isn't an id already in the plan is dropped. It can rank and suggest, not invent an action outside the catalog — see "Does ranking change anything" below for what that buys.
 
 The rules lean on what has actually paid — unauthenticated reach into sensitive functions, and identifier tampering — and rank those first:
 
@@ -142,6 +142,28 @@ The executor found real distinct objects behind those ids — it isn't missing t
 
 The measurement is baked in as a test (`internal/agent`): the pipeline runs against an app with a known bug list, and asserts it engages the IDOR/unauth surface while the ledger clears **zero** unprovable findings — precision 1.0, no false-positive reports — and never leaves scope.
 
+## Does ranking change anything? (`internal/llmrank`)
+
+`warrant run`/`plan` default to the hand-written priorities above. Set `WARRANT_LLM_RANK=1` and `WARRANT_LLM_API_KEY` and a model re-ranks the same action list instead — `warrant rankeval` measures what that re-ranking is worth against a fixture with three planted unauth/IDOR endpoints buried in seventeen decoys (blog posts, search, a contact form, a login form):
+
+```
+$ WARRANT_LLM_API_KEY=... warrant rankeval
+rankeval: 25 actions total, 6 of them the genuine unauth/IDOR bugs
+
+hand-written priority: positions [1 2 3 4 5 6], mean 3.5 | reportable=0 refused=6
+LLM-ranked (gemini-3.1-flash-lite):  positions [1 2 3 4 5 6], mean 3.5 | reportable=0 refused=6
+
+reportable/refused counts match exactly between rankings, as they must: llmrank can only
+reorder plan.Plan's output, so the evidence ledger's verdicts are unaffected by which ranker ran.
+```
+
+Two honest findings, not one flattering one:
+
+- The model's ranking **tied** the hand-written rules exactly — same six positions, same mean. On this fixture there was nothing to improve on, because the rules already put every unauth/IDOR action ahead of every decoy. I have not found a fixture where an LLM ranker beats hand-written priority; I'd want one before claiming it does.
+- `reportable`/`refused` are identical across both rankings, every run. That's not a coincidence to report as a result — it's the architecture working: ranking only changes *order*, never what the ledger decides, because llmrank cannot add, remove, or mutate an action (`internal/llmrank/llmrank_test.go` proves this against an adversarial reply: an invented id, and an id requested via an injected instruction in a rationale string, both get dropped before they ever reach the executor).
+
+What ranking is actually for, then, is attention under a budget — which probe a human or a time-boxed scan looks at first when there are more proposed actions than time — not finding anything the rules would have missed. I haven't measured that case (many more decoys, a cap on how many actions run) yet.
+
 ## Use
 
 ```
@@ -151,7 +173,10 @@ warrant review <finding.json>                apply the evidence policy
 warrant recon  <scope.json> <seed-url>       crawl in scope, map endpoints & forms
 warrant plan   <scope.json> <seed-url>       recon, then propose ranked probe actions
 warrant run    <scope.json> <seed-url>       recon, plan, run SAFE probes, judge findings
+warrant rankeval                             measure hand-written vs LLM ranking (needs WARRANT_LLM_API_KEY)
 ```
+
+`plan` and `run` rank by hand-written priority unless `WARRANT_LLM_RANK=1` is set.
 
 `scope` and `review` exit 3 when the answer is no, which is different from exiting 1 because something broke.
 
@@ -166,7 +191,7 @@ The loop is closed and tested end to end: scope → egress → recon → world m
 What it is: a scope-safe agent that maps a target, decides what to try, runs the read-only probes, and only files what it can prove. What it is not, yet, and I'd rather say so than imply otherwise:
 
 - The probe catalog is small — IDOR, missing-auth, method and header checks. It's the shape that has paid, not the whole surface.
-- The planner's rules are hand-written. The typed catalog is exactly what would let an LLM rank and propose here later without being able to invent an action the executor doesn't understand — but that swap isn't done.
+- The planner's rules are hand-written, and an LLM can now re-rank what they propose (`internal/llmrank`) without being able to invent an action outside the catalog. On the one fixture measured so far it ties the hand-written order rather than beating it — see "Does ranking change anything" above. The rules still choose *what* gets proposed; only the order is up for grabs.
 - Reachability is the thing the executor can't establish alone (a second account, an id-disclosure), which is why honest IDOR findings come back refused. Closing that gap — chaining a disclosure into a reachability claim — is the natural next capability.
 - HTML recon is regex-based and misses JS-built links.
 
