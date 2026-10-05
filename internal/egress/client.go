@@ -16,6 +16,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"sync"
@@ -63,11 +64,86 @@ func New(s *scope.Scope, a Auditor) *Client {
 			CheckRedirect: func(*http.Request, []*http.Request) error {
 				return http.ErrUseLastResponse
 			},
+			Transport: &http.Transport{DialContext: safeDialContext(s, a, net.DefaultResolver)},
 		},
 		MaxRedirects: 5,
 		UserAgent:    "warrant/0.1 (authorized security testing; " + s.Engagement + ")",
 		gap:          gap,
 	}
+}
+
+// safeDialContext is the dial-time half of the scope gate. Check (in
+// internal/scope) authorizes a request by the hostname string in its URL;
+// without this, a DNS name that resolves to a private or loopback address --
+// through misconfiguration, or a rebinding attack that returns a different
+// answer at connect time than it did when scope.Check looked the name up --
+// would reach the network through Go's default dialer completely
+// unexamined. That's exactly the threat AllowPrivate's own doc comment
+// names ("a hostname that resolves to 127.0.0.1"); without this function the
+// defense it promises didn't exist for anything but an IP literal typed
+// directly into the URL.
+//
+// It resolves addr's host itself (net.Dial would otherwise do this
+// internally, where nothing could inspect the result), checks every
+// returned address against scope.ResolvedIPAllowed, and dials only an
+// allowed one -- never the hostname, so there is no second lookup between
+// the check and the connection that a rebinding attacker could answer
+// differently. Every resolved address is logged through the same Auditor
+// Check uses, allowed or refused, for the same reason Check's refusals are:
+// the record matters as much as the request.
+//
+// resolver is *net.Resolver in production (New passes net.DefaultResolver);
+// taking it as a parameter rather than calling the package-level default
+// directly is what lets a test stand in a hostname that resolves to a
+// private address without needing a real DNS server that would do that.
+func safeDialContext(s *scope.Scope, a Auditor, resolver ipResolver) func(ctx context.Context, network, addr string) (net.Conn, error) {
+	var dialer net.Dialer
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(addr)
+		if err != nil {
+			return nil, fmt.Errorf("dial %q: %w", addr, err)
+		}
+
+		var candidates []net.IP
+		if ip := net.ParseIP(host); ip != nil {
+			candidates = []net.IP{ip}
+		} else {
+			addrs, err := resolver.LookupIPAddr(ctx, host)
+			if err != nil {
+				return nil, fmt.Errorf("resolve %q: %w", host, err)
+			}
+			for _, a := range addrs {
+				candidates = append(candidates, a.IP)
+			}
+		}
+
+		for _, ip := range candidates {
+			if s.ResolvedIPAllowed(ip) {
+				record(a, host, ip, true)
+				return dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
+			}
+			record(a, host, ip, false)
+		}
+		return nil, fmt.Errorf("%s resolved only to private/loopback addresses and allow_private is off", host)
+	}
+}
+
+// ipResolver is the one method of *net.Resolver safeDialContext needs,
+// extracted so a test can substitute a resolver that returns a chosen
+// address instead of asking real DNS.
+type ipResolver interface {
+	LookupIPAddr(ctx context.Context, host string) ([]net.IPAddr, error)
+}
+
+func record(a Auditor, host string, ip net.IP, allowed bool) {
+	if a == nil {
+		return
+	}
+	reason := fmt.Sprintf("%s resolved to %s", host, ip)
+	if !allowed {
+		reason = fmt.Sprintf("%s resolved to private/loopback address %s and allow_private is off", host, ip)
+	}
+	a.Record("DNS", &url.URL{Host: host}, scope.Decision{Allowed: allowed, Reason: reason})
 }
 
 // OutOfScopeError is returned rather than swallowed, because the caller

@@ -227,14 +227,44 @@ func note(r Rule) string {
 // isPrivateHost is deliberately conservative: an unparseable literal is
 // treated as private rather than public, because the failure we care about is
 // letting something through, not blocking too much.
+//
+// For a DNS name this only catches the literal string "localhost" -- the
+// actual resolved address isn't known yet, and checking it is
+// ResolvedIPAllowed's job, called from the dialer at connect time (see
+// internal/egress). Skipping that half would leave exactly the case
+// AllowPrivate's own doc comment names as the threat: "a hostname that
+// resolves to 127.0.0.1" -- including one that resolves there only after
+// Check already granted the request, the DNS-rebinding shape.
 func isPrivateHost(host string) bool {
 	if strings.EqualFold(host, "localhost") {
 		return true
 	}
 	ip := net.ParseIP(host)
 	if ip == nil {
-		return false // a DNS name; resolution is checked at dial time, not here
+		return false // a DNS name; the resolved address is checked at dial time
 	}
+	return isPrivateIP(ip)
+}
+
+// isPrivateIP is the address-level half of the private-target check, shared
+// by isPrivateHost (an IP literal in the URL) and ResolvedIPAllowed (an IP a
+// DNS name resolved to).
+func isPrivateIP(ip net.IP) bool {
 	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
 		ip.IsLinkLocalMulticast() || ip.IsUnspecified()
+}
+
+// ResolvedIPAllowed reports whether ip is permitted to be dialed, given
+// AllowPrivate. It's the dial-time counterpart to Check: Check decides
+// whether a URL's hostname is in scope using only the string in the URL, so
+// an allow-listed DNS name that resolves to a private or loopback address --
+// through misconfiguration, or a rebinding attack timed to return a
+// different answer after the scope check than at connect time -- would
+// otherwise reach the network unchecked. Call this from the dialer with
+// every address a lookup returns, before connecting to any of them.
+func (s *Scope) ResolvedIPAllowed(ip net.IP) bool {
+	if s.AllowPrivate {
+		return true
+	}
+	return !isPrivateIP(ip)
 }
