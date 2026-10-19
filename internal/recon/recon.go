@@ -22,6 +22,7 @@ package recon
 import (
 	"context"
 	"fmt"
+	"html"
 	"net/url"
 	"regexp"
 	"strings"
@@ -152,13 +153,22 @@ func finalURL(requested *url.URL, hops []string) *url.URL {
 }
 
 var (
-	hrefRe = regexp.MustCompile(`(?i)<a\b[^>]*\bhref\s*=\s*["']([^"'#]+)["']`)
+	hrefRe = regexp.MustCompile(`(?i)<a\b[^>]*\bhref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))`)
 	formRe = regexp.MustCompile(`(?is)<form\b([^>]*)>(.*?)</form>`)
 	attrRe = func(name string) *regexp.Regexp {
-		return regexp.MustCompile(`(?i)\b` + name + `\s*=\s*["']([^"']*)["']`)
+		return regexp.MustCompile(`(?i)\b` + name + `\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))`)
 	}
-	inputRe = regexp.MustCompile(`(?is)<(?:input|select|textarea)\b[^>]*\bname\s*=\s*["']([^"']+)["']`)
+	inputRe = regexp.MustCompile(`(?is)<(?:input|select|textarea)\b[^>]*\bname\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s>]+))`)
 )
+
+func attrValue(m []string) string {
+	for _, value := range m[1:] {
+		if value != "" {
+			return html.UnescapeString(value)
+		}
+	}
+	return ""
+}
 
 // extractLinks resolves every <a href> against base and returns absolute
 // http(s) URLs, fragment-stripped and de-duplicated.
@@ -166,7 +176,7 @@ func extractLinks(base *url.URL, body string) []string {
 	seen := map[string]bool{}
 	var out []string
 	for _, m := range hrefRe.FindAllStringSubmatch(body, -1) {
-		raw := strings.TrimSpace(m[1])
+		raw := strings.TrimSpace(attrValue(m))
 		if raw == "" || strings.HasPrefix(strings.ToLower(raw), "javascript:") ||
 			strings.HasPrefix(strings.ToLower(raw), "mailto:") ||
 			strings.HasPrefix(strings.ToLower(raw), "tel:") {
@@ -199,19 +209,19 @@ func extractForms(base *url.URL, body string) []model.Form {
 		attrs, inner := m[1], m[2]
 
 		action := base.String()
-		if am := actionRe.FindStringSubmatch(attrs); am != nil && strings.TrimSpace(am[1]) != "" {
-			if abs, err := base.Parse(strings.TrimSpace(am[1])); err == nil {
+		if am := actionRe.FindStringSubmatch(attrs); am != nil && strings.TrimSpace(attrValue(am)) != "" {
+			if abs, err := base.Parse(strings.TrimSpace(attrValue(am))); err == nil {
 				abs.Fragment = ""
 				action = abs.String()
 			}
 		}
 		method := "GET"
-		if mm := methodRe.FindStringSubmatch(attrs); mm != nil && strings.TrimSpace(mm[1]) != "" {
-			method = strings.ToUpper(strings.TrimSpace(mm[1]))
+		if mm := methodRe.FindStringSubmatch(attrs); mm != nil && strings.TrimSpace(attrValue(mm)) != "" {
+			method = strings.ToUpper(strings.TrimSpace(attrValue(mm)))
 		}
 		var inputs []string
 		for _, im := range inputRe.FindAllStringSubmatch(inner, -1) {
-			inputs = append(inputs, im[1])
+			inputs = append(inputs, attrValue(im))
 		}
 		out = append(out, model.Form{
 			Page:   base.String(),
