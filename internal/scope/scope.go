@@ -102,6 +102,16 @@ func (s *Scope) validate() error {
 		if strings.Contains(h, "*") && !strings.HasPrefix(h, "*.") {
 			return fmt.Errorf("rule %d: wildcard must be a leading label, e.g. *.example.com, got %q", i, h)
 		}
+		for _, path := range r.Paths {
+			if !strings.HasPrefix(path, "/") {
+				return fmt.Errorf("rule %d has path %q that must start with /", i, path)
+			}
+		}
+		for _, port := range r.Ports {
+			if port < 1 || port > 65535 {
+				return fmt.Errorf("rule %d has invalid port %d", i, port)
+			}
+		}
 	}
 	return nil
 }
@@ -142,13 +152,15 @@ func (r Rule) matches(method string, u *url.URL) bool {
 		return false
 	}
 	if len(r.Paths) > 0 {
-		p := u.EscapedPath()
+		// Match the decoded path used by HTTP handlers. Matching the escaped
+		// form can let encoded separators bypass a deny rule.
+		p := u.Path
 		if p == "" {
 			p = "/"
 		}
 		ok := false
 		for _, pre := range r.Paths {
-			if strings.HasPrefix(p, pre) {
+			if pathPrefixMatches(p, pre) {
 				ok = true
 				break
 			}
@@ -158,6 +170,15 @@ func (r Rule) matches(method string, u *url.URL) bool {
 		}
 	}
 	return true
+}
+
+// A path prefix names a path subtree, not a string prefix: /v1 must not
+// authorize /v10. A trailing slash explicitly selects descendants.
+func pathPrefixMatches(path, prefix string) bool {
+	if strings.HasSuffix(prefix, "/") {
+		return strings.HasPrefix(path, prefix)
+	}
+	return path == prefix || strings.HasPrefix(path, prefix+"/")
 }
 
 // effectivePort resolves the port a request will actually reach, filling in

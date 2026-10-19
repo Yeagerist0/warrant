@@ -93,6 +93,23 @@ func TestPathAndMethodNarrowing(t *testing.T) {
 	}
 }
 
+func TestPathPrefixesRespectSegmentsAndDecodedSeparators(t *testing.T) {
+	s := &Scope{Engagement: "test", Authority: "local lab", Allow: []Rule{{Host: "api.example.com", Paths: []string{"/api/v1"}}}, Deny: []Rule{{Host: "api.example.com", Paths: []string{"/private/"}}}}
+	for _, tc := range []struct {
+		raw  string
+		want bool
+	}{
+		{"https://api.example.com/api/v1", true},
+		{"https://api.example.com/api/v1/users", true},
+		{"https://api.example.com/api/v10/users", false},
+		{"https://api.example.com/private%2Fkeys", false},
+	} {
+		if got := s.Check("GET", mustURL(t, tc.raw)).Allowed; got != tc.want {
+			t.Errorf("%s: allowed=%v want %v", tc.raw, got, tc.want)
+		}
+	}
+}
+
 func TestPrivateAddressesBlockedUnlessOptedIn(t *testing.T) {
 	s := testScope()
 	s.Allow = append(s.Allow, Rule{Host: "127.0.0.1"}, Rule{Host: "10.0.0.5"}, Rule{Host: "localhost"})
